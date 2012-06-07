@@ -1,28 +1,39 @@
 <?php
 
 // see expressjs.com/guide.html
-class Express {
-	
-	public static function createServer(Express_Logger_Interface $logger = null, Express_BodyParser_Interface $parser = null) {
-		return new Express_Server($logger, $parser);
-	}
+//class Express {
+//	
+//	public static function createServer(Express_Logger_Interface $logger = null, Express_BodyParser_Interface $parser = null) {
+//		return new Express_Server($logger, $parser);
+//	}
+//	
+//}
+
+interface Express_Server_Interface {
 	
 }
 
-class Express_Server {
+class Express_Forward extends Exception {
+	
+}
+
+class Express_Server implements Express_Server_Interface {
 	public $logger;
 	public $parser;
 	public $routes = array();
-	public $lookup; // instead of $routes use a collection called Routes
+	public $lookup; // instead of $routes use a collection of Routes called $lookup
 	public $router;
+	public $request;
+	public $respones;
+	public $_forwardLimit = 16;
 	public static $defaultConfig = array(
 		
 	);
-	public function __construct(Express_Logger_Interface $logger = null, Express_BodyParser_Interface $parser = null) {
-		$this->logger = $logger;
-		$this->parser = $parser;
-		$this->config = self::$defaultConfig;
-	}
+//	public function __construct(Express_Logger_Interface $logger = null, Express_BodyParser_Interface $parser = null) {
+//		$this->logger = $logger;
+//		$this->parser = $parser;
+//		$this->config = self::$defaultConfig;
+//	}
 	public function configure($name, $value) {
 		$this->config['value'] = $value;
 	}
@@ -38,7 +49,10 @@ class Express_Server {
 	public function disabled() {
 		
 	}
-	public function redirect() {
+	public function forward($toUrl) {
+		throw new Express_Forward($toUrl);
+	}
+	public function redirect($toUrl) {
 		
 	}
 	public function helpers() {
@@ -56,15 +70,15 @@ class Express_Server {
 	public function register() {
 		
 	}
-	public function useLogger(Express_Logger_Interface $logger) {
-		$this->logger = $logger;
-	}
-	public function useParser(Express_BodyParser_Interface $parser) {
-		$this->parser = $parser;
-	}
-	public function useRouter(Express_Router $router) {
-		$this->router = $router;
-	}
+//	public function useLogger(Express_Logger_Interface $logger) {
+//		$this->logger = $logger;
+//	}
+//	public function useParser(Express_BodyParser_Interface $parser) {
+//		$this->parser = $parser;
+//	}
+//	public function useRouter(Express_Router_Interface $router) {
+//		$this->router = $router;
+//	}
 	public function get($route, $callback) {
 		$this->routes[] = new Express_Route($this, 'get', $route, $callback);
 	}
@@ -86,13 +100,18 @@ class Express_Server {
 	public function error($callback) {
 		// ?
 	}
+	public function get404Callback() {
+		return function($req, $res) {
+			$res->send('<h1>404 Page Not Found</h1>');
+		};
+	}
 	public function listen() {
-		if (!$this->logger) {
-			$this->logger = new Express_Logger($this);
-		}
-		if (!$this->parser) {
-			$this->parser = new Express_BodyParser($this);
-		}
+//		if (!$this->logger) {
+//			$this->logger = new Express_Logger($this);
+//		}
+//		if (!$this->parser) {
+//			$this->parser = new Express_BodyParser($this);
+//		}
 		if (!$this->router) {
 			$this->router = new Express_Router($this);
 		}
@@ -100,33 +119,54 @@ class Express_Server {
 		$this->response = new Express_Response($this);
 		// decide which route to use
 		$callbacks = $this->router->getCallbacks();
-		for ($i = 0; $i < count($callbacks); ++$i) {
-			call_user_func($callbacks[$i], 
-				$this->request, 
-				$this->response, 
-				new Express_Next($this, $callbacks[$i+1]) // a callable object: $next()
-			);
+		try {
+			$next = new Express_Next($this, $callbacks);
+			$result = $next();
+			echo $this->response->output;
+			return $result;
 		}
-		
+		catch (Express_Forward $fwd) {
+			if (--$this->_forwardLimit == 0) {
+				echo '<h1>500 Server Error</h1>';
+				die;
+			}
+			$toUrl = $fwd->getMessage();
+			$_GET['express_php_url'] = ltrim($toUrl, '/');
+			$this->listen();
+		}
 	}
 }
 
 class Express_Next {
 	
-	public function __construct(Express_Server_Interface $server, $callback) {
+	public function __construct(Express_Server_Interface $server, $callbacks) {
 		$this->server = $server;
-		$this->callback = $callback;
+		$this->callbacks = $callbacks;
 	}
 	
 	public function __invoke() {
 		$args = func_get_args();
-		// put args into $this->server->request or add onto callback using call_user_func_array
-		call_user_func($callback,
+		// TODO: put args into $this->server->request or add onto callback using call_user_func_array
+		// checkout what ExpressJS does
+		if (count($this->callbacks) > 0) {
+			$callback = $this->callbacks[0];
+			$next = new Express_Next($this->server, array_slice($this->callbacks, 1));
+		}
+		else {
+			$callback = $this->server->get404Callback();
+			$next = function() {};
+		}
+		call_user_func(
+			$callback,
 			$this->server->request,
 			$this->server->response,
-			$this->callback ?: $this->server->get404Callback()
+			$next
 		);
 	}
+	
+}
+
+class FunctionCurry {
 	
 }
 
@@ -158,7 +198,30 @@ class Express_Route {
 	}
 	
 	public function matches() {
-		
+		$params = array();
+		$route = trim($this->route, '/');
+		//$regex = preg_quote($route, '@');
+		$regex = $route;
+		$idx = 0;
+		$regex = preg_replace_callback('@(\:[\w_]+|\*)@', function($match) use (&$params, &$idx) {
+			if ($match[1] == '*') {
+				$params[$idx] = $idx;
+			}
+			else {
+				$params[$idx] = trim($match[1], ':');
+			}
+			$idx++;
+			return '([^/]+)';
+		}, $regex);
+		$regex = "@^$regex@";
+		preg_match($regex, $_GET['express_php_url'], $match);
+		if (preg_match($regex, $_GET['express_php_url'], $match)) {
+			foreach ($params as $idx => $param) {
+				$this->server->request->params[$param] = $match[$idx+1];
+			}
+			return true;
+		}
+		return false;
 	}
 	
 }
@@ -169,11 +232,10 @@ class Express_Request {
 	
 	public $body; // raw request body
 	
-	public $session;
+	public $params = array();
 	
 	public function __construct(Express_Server_Interface $server) {
 		$this->server = $server;
-		$this->session = new Express_Session($this);
 		// TODO: populate get, post, etc.
 	}
 	
@@ -202,9 +264,16 @@ class Express_Request {
 
 class Express_Response {
 	
-	public $output;
+	public $server;
 	
-	public $charset;
+	public $output = '';
+	
+	public $charset = 'utf-8';
+	
+	public function __construct(Express_Server_Interface $server) {
+		$this->server = $server;
+		// TODO: populate get, post, etc.
+	}	
 	
 	public function render($view, $options = array()) {
 		
@@ -218,11 +287,10 @@ class Express_Response {
 		$this->output .= $str;
 	}
 	
-	public function __destruct() {
-		$this->sendHeaders();
-		echo $this->output;
+	public function forward($toUrl) {
+		return $this->server->forward($toUrl);
 	}
-	
+		
 	public function redirect($url, $status = null) {
 		
 	}
